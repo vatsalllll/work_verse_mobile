@@ -122,3 +122,15 @@ npx expo run:android
 ## 📝 License
 
 MIT License - See main project for details
+
+## WorkVerse Mobile
+
+A React Native / Expo mobile game where you explore a 2D town and chat with AI philosopher agents. Built as the mobile frontend for the WorkVerse AI platform.
+
+### Features
+- 🗺️ Open-world 2D map with pinch-to-zoom and drag-to-pan
+- 🕹️ Virtual joystick with animated visual feedback
+- 🤖 13 AI philosopher NPCs with roaming state machines
+- 💬 Real-time streaming chat via WebSocket
+- 🧱 Tile-based collision with bounding-box resolution
+- 📱 Keyboard-aware dialogue UI for smooth mobile UX
