@@ -29,25 +29,25 @@ const PLAYER_SPEED = 5;
 const INTERACTION_DISTANCE = 55;
 const NPC_MOVE_SPEED = 1.2; // pixels per frame (~20px/s at 16ms)
 
-// Philosopher configurations - matching web version spawn points
+// Office coworker configurations — 5 AI personas (matching web UI mapping) + busy background NPCs
 const PHILOSOPHERS: PhilosopherData[] = [
-  { id: 'socrates', name: 'Socrates', x: 300, y: 400, color: '#FFD700', direction: 'right', roamRadius: 80 },
-  { id: 'aristotle', name: 'Aristotle', x: 500, y: 300, color: '#C0C0C0', direction: 'right', roamRadius: 70 },
-  { id: 'plato', name: 'Plato', x: 700, y: 500, color: '#CD7F32', direction: 'front', roamRadius: 75 },
-  { id: 'descartes', name: 'Descartes', x: 200, y: 600, color: '#4169E1', direction: 'front', roamRadius: 65 },
-  { id: 'leibniz', name: 'Leibniz', x: 900, y: 400, color: '#9932CC', direction: 'front', roamRadius: 72 },
-  { id: 'ada_lovelace', name: 'Ada Lovelace', x: 400, y: 700, color: '#FF69B4', direction: 'front', roamRadius: 68 },
-  { id: 'turing', name: 'Turing', x: 600, y: 266, color: '#00CED1', direction: 'front', roamRadius: 77 },
-  { id: 'searle', name: 'Searle', x: 800, y: 600, color: '#FF6347', direction: 'front', roamRadius: 73 },
-  { id: 'chomsky', name: 'Chomsky', x: 350, y: 516, color: '#32CD32', direction: 'front', roamRadius: 69 },
-  { id: 'dennett', name: 'Dennett', x: 550, y: 402, color: '#FF8C00', direction: 'front', roamRadius: 71 },
-  { id: 'miguel', name: 'Miguel', x: 750, y: 350, color: '#8B4513', direction: 'front', roamRadius: 30, defaultMessage: "Hey there! I'm Miguel, but you can call me Mr Agent. I'd love to chat, but I'm currently writing my Substack article for tomorrow." },
-  { id: 'paul', name: 'Paul', x: 250, y: 350, color: '#2F4F4F', direction: 'front', roamRadius: 30, defaultMessage: "Hey, I'm busy teaching my cat AI with my latest course. I can't talk right now. Check out Decoding ML for more on my thoughts." },
+  { id: 'socrates', name: 'Rahul (CTO)', personaId: 'cto', x: 300, y: 400, color: '#FFD700', direction: 'right', roamRadius: 80 },
+  { id: 'aristotle', name: 'Simran (HR)', personaId: 'hr', x: 500, y: 300, color: '#C0C0C0', direction: 'right', roamRadius: 70 },
+  { id: 'plato', name: 'Priya (PM)', personaId: 'pm', x: 700, y: 500, color: '#CD7F32', direction: 'front', roamRadius: 75 },
+  { id: 'descartes', name: 'Dev', x: 200, y: 600, color: '#4169E1', direction: 'front', roamRadius: 65, defaultMessage: "Sorry, I'm deep in a debugging session right now. Catch me later!" },
+  { id: 'leibniz', name: 'Karan', x: 900, y: 400, color: '#9932CC', direction: 'front', roamRadius: 72, defaultMessage: "In back-to-back meetings all day. Ping me tomorrow!" },
+  { id: 'ada_lovelace', name: 'Meera (Designer)', personaId: 'designer', x: 400, y: 700, color: '#FF69B4', direction: 'front', roamRadius: 68 },
+  { id: 'turing', name: 'Arjun (Engineer)', personaId: 'swe', x: 600, y: 266, color: '#00CED1', direction: 'front', roamRadius: 77 },
+  { id: 'searle', name: 'Sam', x: 800, y: 600, color: '#FF6347', direction: 'front', roamRadius: 73, defaultMessage: "Heads down on a deadline, can't talk right now." },
+  { id: 'chomsky', name: 'Nikhil', x: 350, y: 516, color: '#32CD32', direction: 'front', roamRadius: 69, defaultMessage: "On a call with a client — let's sync up later!" },
+  { id: 'dennett', name: 'Daniel', x: 550, y: 402, color: '#FF8C00', direction: 'front', roamRadius: 71, defaultMessage: "Writing up my sprint retro notes, catch you in a bit." },
+  { id: 'miguel', name: 'Miguel', x: 750, y: 350, color: '#8B4513', direction: 'front', roamRadius: 30, defaultMessage: "Hey there! I'd love to chat, but I'm currently writing my article for tomorrow." },
+  { id: 'paul', name: 'Paul', x: 250, y: 350, color: '#2F4F4F', direction: 'front', roamRadius: 30, defaultMessage: "Hey, I'm busy with my latest course. I can't talk right now." },
 ];
 
 // API Configuration — use machine IP for physical devices, localhost for simulator
-const API_BASE_URL = 'http://10.108.57.208:8000';
-const WS_BASE_URL = 'ws://10.108.57.208:8000';
+const API_BASE_URL = 'http://localhost:8000';
+const WS_BASE_URL = 'ws://localhost:8000';
 
 // Screens
 type Screen = 'menu' | 'game' | 'instructions';
@@ -60,6 +60,7 @@ interface Message {
 interface PhilosopherData {
   id: string;
   name: string;
+  personaId?: string; // backend persona (cto/swe/pm/designer/hr); absent = busy NPC with canned reply
   x: number;
   y: number;
   color: string;
@@ -113,6 +114,138 @@ export default function App() {
   const walkFrameCounter = useRef(0);
   const walkFrameTimer = useRef(0);
   const isMovingRef = useRef(false);
+  const authTokenRef = useRef<string | null>(null);
+
+  // --- Demo workspace login (backend requires JWT for /chat and /ws/chat) ---
+  const [demoUsers, setDemoUsers] = useState<{ id: string; name: string; email: string }[]>([]);
+  const [currentUser, setCurrentUser] = useState<{ id: string; name: string; email: string } | null>(null);
+
+  const demoLogin = useCallback(async (user: { id: string; name: string; email: string }) => {
+    try {
+      const loginRes = await fetch(`${API_BASE_URL}/auth/demo-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: user.email }),
+      });
+      const { token, user: u } = await loginRes.json();
+      authTokenRef.current = token;
+      setCurrentUser({ id: u?.id ?? user.id, name: u?.name ?? user.name, email: user.email });
+    } catch (err) {
+      console.error('Demo login failed:', err);
+    }
+  }, []);
+
+  // Fetch demo users on start and auto-login as the first one
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/auth/demo-users`);
+        const { users } = await res.json();
+        if (!users?.length) throw new Error('No demo users available');
+        setDemoUsers(users);
+        await demoLogin(users[0]);
+      } catch (err) {
+        console.error('Could not load demo users:', err);
+      }
+    })();
+  }, [demoLogin]);
+
+  // Presence heartbeat — lets other tabs/devices see this user as online
+  useEffect(() => {
+    if (!currentUser) return;
+    const authHeaders = () => ({ Authorization: `Bearer ${authTokenRef.current}` });
+    const ping = () =>
+      fetch(`${API_BASE_URL}/presence/ping`, { method: 'POST', headers: authHeaders() }).catch(() => {});
+    ping();
+    const interval = setInterval(ping, 15000);
+    return () => clearInterval(interval);
+  }, [currentUser]);
+
+  // --- Human-to-human chat (DMs with real workspace members) ---
+  interface WorkspaceUser { id: string; name: string; online: boolean }
+  interface HumanMessage { id: string; text: string; mine: boolean; from_name: string }
+  const [humanChatOpen, setHumanChatOpen] = useState(false);
+  const [workspaceUsers, setWorkspaceUsers] = useState<WorkspaceUser[]>([]);
+  const [activeChatUser, setActiveChatUser] = useState<WorkspaceUser | null>(null);
+  const [humanMessages, setHumanMessages] = useState<HumanMessage[]>([]);
+  const [humanInput, setHumanInput] = useState('');
+  const [unreadByUser, setUnreadByUser] = useState<Record<string, number>>({});
+  const humanScrollRef = useRef<ScrollView>(null);
+
+  const authedFetch = useCallback((path: string, init?: RequestInit) =>
+    fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authTokenRef.current}`,
+        ...(init?.headers || {}),
+      },
+    }), []);
+
+  // Poll unread counts (badge on the chat button)
+  useEffect(() => {
+    if (!currentUser || screen !== 'game') return;
+    const poll = async () => {
+      try {
+        const res = await authedFetch('/dm/unread');
+        const { unread } = await res.json();
+        const map: Record<string, number> = {};
+        (unread || []).forEach((u: any) => { map[u.from_user_id] = u.count; });
+        setUnreadByUser(map);
+      } catch { }
+    };
+    poll();
+    const interval = setInterval(poll, 5000);
+    return () => clearInterval(interval);
+  }, [currentUser, screen, authedFetch]);
+
+  // Poll workspace directory while the user list is open
+  useEffect(() => {
+    if (!humanChatOpen || activeChatUser || !currentUser) return;
+    const poll = async () => {
+      try {
+        const res = await authedFetch('/users');
+        const { users } = await res.json();
+        setWorkspaceUsers(users || []);
+      } catch { }
+    };
+    poll();
+    const interval = setInterval(poll, 5000);
+    return () => clearInterval(interval);
+  }, [humanChatOpen, activeChatUser, currentUser, authedFetch]);
+
+  // Poll the open conversation
+  useEffect(() => {
+    if (!activeChatUser || !currentUser) return;
+    const poll = async () => {
+      try {
+        const res = await authedFetch(`/dm/with/${activeChatUser.id}`);
+        const { messages: msgs } = await res.json();
+        setHumanMessages(msgs || []);
+      } catch { }
+    };
+    poll();
+    const interval = setInterval(poll, 1500);
+    return () => clearInterval(interval);
+  }, [activeChatUser, currentUser, authedFetch]);
+
+  const sendHumanMessage = useCallback(async () => {
+    const text = humanInput.trim();
+    if (!text || !activeChatUser) return;
+    setHumanInput('');
+    // Optimistic append
+    setHumanMessages((prev) => [...prev, { id: `tmp-${prev.length}`, text, mine: true, from_name: currentUser?.name || 'Me' }]);
+    try {
+      await authedFetch('/dm/send', {
+        method: 'POST',
+        body: JSON.stringify({ to_user_id: activeChatUser.id, text }),
+      });
+    } catch (err) {
+      console.error('Failed to send DM:', err);
+    }
+  }, [humanInput, activeChatUser, currentUser, authedFetch]);
+
+  const totalUnread = Object.values(unreadByUser).reduce((a, b) => a + b, 0);
 
   // NPC roaming state — mutable ref for each philosopher
   const philStatesRef = useRef<PhilosopherState[]>(
@@ -140,6 +273,59 @@ export default function App() {
   useEffect(() => {
     streamingTextRef.current = streamingText;
   }, [streamingText]);
+
+  // Keyboard controls for laptop/web — arrow keys / WASD drive the same
+  // joystickPosition the touch joystick uses. Enter talks, Escape closes.
+  const pressedKeysRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (Platform.OS !== 'web' || screen !== 'game') return;
+
+    const applyKeys = () => {
+      const k = pressedKeysRef.current;
+      const x = (k.has('ArrowRight') || k.has('d') ? 1 : 0) - (k.has('ArrowLeft') || k.has('a') ? 1 : 0);
+      const y = (k.has('ArrowDown') || k.has('s') ? 1 : 0) - (k.has('ArrowUp') || k.has('w') ? 1 : 0);
+      // Normalize diagonals so they aren't faster
+      const len = Math.sqrt(x * x + y * y) || 1;
+      joystickPosition.current = { x: x / len, y: y / len };
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Don't steal keys while typing in the chat inputs
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'a', 's', 'd'].includes(e.key)) {
+        e.preventDefault();
+        pressedKeysRef.current.add(e.key);
+        applyKeys();
+      } else if ((e.key === 'Enter' || e.key === ' ') && !dialogueOpen && nearbyPhilRef.current) {
+        e.preventDefault();
+        setActivePhilosopher(nearbyPhilRef.current);
+        setDialogueOpen(true);
+        setMessages([]);
+        setInputText('');
+      }
+    };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (pressedKeysRef.current.delete(e.key)) applyKeys();
+    };
+
+    const onBlur = () => {
+      pressedKeysRef.current.clear();
+      joystickPosition.current = { x: 0, y: 0 };
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+      onBlur();
+    };
+  }, [screen, dialogueOpen]);
 
   // Game loop — uses refs to avoid setState on every frame
   useEffect(() => {
@@ -337,7 +523,11 @@ export default function App() {
   const connectWebSocket = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    wsRef.current = new WebSocket(`${WS_BASE_URL}/ws/chat`);
+    const token = authTokenRef.current;
+    const wsUrl = token
+      ? `${WS_BASE_URL}/ws/chat?token=${encodeURIComponent(token)}`
+      : `${WS_BASE_URL}/ws/chat`;
+    wsRef.current = new WebSocket(wsUrl);
 
     wsRef.current.onopen = () => {
       console.log('WebSocket connected');
@@ -380,9 +570,9 @@ export default function App() {
     setMessages((prev) => [...prev, { type: 'user', text: userMessage }]);
     setInputText('');
 
-    // Check for default message philosophers (Miguel, Paul)
-    if (activePhilosopher.defaultMessage) {
-      setMessages((prev) => [...prev, { type: 'philosopher', text: activePhilosopher.defaultMessage! }]);
+    // Busy coworkers (no backend persona) reply with their canned message
+    if (activePhilosopher.defaultMessage || !activePhilosopher.personaId) {
+      setMessages((prev) => [...prev, { type: 'philosopher', text: activePhilosopher.defaultMessage ?? "Sorry, I'm busy right now!" }]);
       return;
     }
 
@@ -397,16 +587,19 @@ export default function App() {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
           message: userMessage,
-          philosopher_id: activePhilosopher.id,
+          persona_id: activePhilosopher.personaId,
         }));
       } else {
         // Fallback to HTTP
         fetch(`${API_BASE_URL}/chat`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(authTokenRef.current ? { Authorization: `Bearer ${authTokenRef.current}` } : {}),
+          },
           body: JSON.stringify({
             message: userMessage,
-            philosopher_id: activePhilosopher.id,
+            persona_id: activePhilosopher.personaId,
           }),
         })
           .then((res) => res.json())
@@ -560,6 +753,29 @@ export default function App() {
 
         {/* Buttons */}
         <View style={styles.menuButtonsContainer}>
+          {/* Demo user picker */}
+          {demoUsers.length > 0 && (
+            <View style={styles.userPickerContainer}>
+              <Text style={styles.userPickerLabel}>
+                Enter the office as{currentUser ? `: ${currentUser.name}` : '…'}
+              </Text>
+              <View style={styles.userPickerChips}>
+                {demoUsers.map((u) => (
+                  <TouchableOpacity
+                    key={u.email}
+                    style={[styles.userChip, currentUser?.email === u.email && styles.userChipActive]}
+                    onPress={() => demoLogin(u)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={[styles.userChipText, currentUser?.email === u.email && styles.userChipTextActive]}>
+                      {u.name}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
+
           <TouchableOpacity
             style={styles.menuButton}
             onPress={() => setScreen('game')}
@@ -576,13 +792,6 @@ export default function App() {
             <Text style={styles.menuButtonText}>Instructions</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.menuButton}
-            onPress={() => { }}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.menuButtonText}>Support Philoagents</Text>
-          </TouchableOpacity>
         </View>
       </View>
     );
@@ -598,9 +807,10 @@ export default function App() {
           <Text style={styles.instructionsTitle}>INSTRUCTIONS</Text>
 
           <View style={styles.instructionsList}>
-            <Text style={styles.instructionText}>• Use joystick for moving</Text>
-            <Text style={styles.instructionText}>• Tap "Talk" button near philosophers</Text>
+            <Text style={styles.instructionText}>• Use joystick or arrow keys / WASD to move</Text>
+            <Text style={styles.instructionText}>• Tap "Talk" (or press Enter) near a coworker</Text>
             <Text style={styles.instructionText}>• Type your message and send</Text>
+            <Text style={styles.instructionText}>• Tap 💬 to message real teammates</Text>
             <Text style={styles.instructionText}>• Tap X to close dialogue</Text>
           </View>
 
@@ -727,10 +937,20 @@ export default function App() {
         <TouchableOpacity onPress={() => setScreen('menu')} style={styles.backButtonTouch}>
           <Text style={styles.backButtonText}>← Menu</Text>
         </TouchableOpacity>
-        <Text style={styles.gameTitle}>PhiloAgents Town</Text>
-        <TouchableOpacity onPress={resetMemory} style={styles.resetButtonTouch}>
-          <Text style={styles.resetButtonText}>Reset 🔄</Text>
-        </TouchableOpacity>
+        <Text style={styles.gameTitle}>WorkVerse Office</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
+          <TouchableOpacity onPress={() => setHumanChatOpen(true)} style={styles.chatButtonTouch}>
+            <Text style={styles.chatButtonText}>💬</Text>
+            {totalUnread > 0 && (
+              <View style={styles.unreadBadge}>
+                <Text style={styles.unreadBadgeText}>{totalUnread}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity onPress={resetMemory} style={styles.resetButtonTouch}>
+            <Text style={styles.resetButtonText}>Reset 🔄</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Controls - Joystick and Interact Button */}
@@ -766,7 +986,7 @@ export default function App() {
             disabled={!nearbyPhilosopher}
           >
             <Text style={styles.interactButtonText}>
-              {nearbyPhilosopher ? `Talk to\n${nearbyPhilosopher.name}` : 'Walk near a\nphilosopher'}
+              {nearbyPhilosopher ? `Talk to\n${nearbyPhilosopher.name}` : 'Walk near a\ncoworker'}
             </Text>
           </TouchableOpacity>
         </View>
@@ -845,6 +1065,108 @@ export default function App() {
                 <Text style={styles.sendButtonText}>➤</Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </KeyboardAvoidingView>
+      )}
+
+      {/* Human-to-human chat panel */}
+      {humanChatOpen && (
+        <KeyboardAvoidingView
+          style={styles.dialogueOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={0}
+        >
+          <View style={styles.dialogueBox}>
+            {/* Header */}
+            <View style={styles.dialogueHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                {activeChatUser && (
+                  <TouchableOpacity onPress={() => { setActiveChatUser(null); setHumanMessages([]); }}>
+                    <Text style={styles.chatBackText}>←</Text>
+                  </TouchableOpacity>
+                )}
+                <Text style={styles.dialogueHeaderText}>
+                  {activeChatUser ? activeChatUser.name : `Teammates${currentUser ? ` — you are ${currentUser.name}` : ''}`}
+                </Text>
+                {activeChatUser?.online && <View style={styles.onlineDot} />}
+              </View>
+              <TouchableOpacity
+                onPress={() => { setHumanChatOpen(false); setActiveChatUser(null); setHumanMessages([]); }}
+                style={styles.dialogueCloseButton}
+              >
+                <Text style={styles.dialogueCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {!activeChatUser ? (
+              /* User directory */
+              <ScrollView style={styles.messagesContainer} contentContainerStyle={styles.messagesContent}>
+                {workspaceUsers.length === 0 && (
+                  <Text style={styles.chatEmptyText}>Loading teammates…</Text>
+                )}
+                {workspaceUsers.map((u) => (
+                  <TouchableOpacity
+                    key={u.id}
+                    style={styles.userRow}
+                    onPress={() => setActiveChatUser(u)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={[styles.presenceDot, u.online ? styles.presenceOnline : styles.presenceOffline]} />
+                    <Text style={styles.userRowName}>{u.name}</Text>
+                    {unreadByUser[u.id] > 0 && (
+                      <View style={[styles.unreadBadge, { position: 'relative', top: 0, right: 0 }]}>
+                        <Text style={styles.unreadBadgeText}>{unreadByUser[u.id]}</Text>
+                      </View>
+                    )}
+                    <Text style={styles.userRowStatus}>{u.online ? 'online' : 'offline'}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            ) : (
+              /* Conversation */
+              <>
+                <ScrollView
+                  ref={humanScrollRef}
+                  style={styles.messagesContainer}
+                  contentContainerStyle={styles.messagesContent}
+                  onContentSizeChange={() => humanScrollRef.current?.scrollToEnd({ animated: true })}
+                >
+                  {humanMessages.length === 0 && (
+                    <Text style={styles.chatEmptyText}>No messages yet — say hi!</Text>
+                  )}
+                  {humanMessages.map((msg) => (
+                    <View
+                      key={msg.id}
+                      style={[
+                        styles.messageBubble,
+                        msg.mine ? styles.userMessage : styles.philosopherMessage,
+                      ]}
+                    >
+                      <Text style={styles.messageText}>{msg.text}</Text>
+                    </View>
+                  ))}
+                </ScrollView>
+                <View style={styles.inputContainer}>
+                  <TextInput
+                    style={styles.textInput}
+                    value={humanInput}
+                    onChangeText={setHumanInput}
+                    placeholder={`Message ${activeChatUser.name}…`}
+                    placeholderTextColor="#666"
+                    onSubmitEditing={sendHumanMessage}
+                    returnKeyType="send"
+                    autoFocus
+                  />
+                  <TouchableOpacity
+                    style={[styles.sendButton, !humanInput.trim() && styles.sendButtonDisabled]}
+                    onPress={sendHumanMessage}
+                    disabled={!humanInput.trim()}
+                  >
+                    <Text style={styles.sendButtonText}>➤</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
           </View>
         </KeyboardAvoidingView>
       )}
@@ -1223,5 +1545,119 @@ const styles = StyleSheet.create({
   sendButtonText: {
     color: '#fff',
     fontSize: 18,
+  },
+
+  // ==================== USER PICKER (MENU) ====================
+  userPickerContainer: {
+    alignItems: 'center',
+    marginBottom: 8,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderRadius: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    maxWidth: 420,
+  },
+  userPickerLabel: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 10,
+  },
+  userPickerChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  userChip: {
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  userChipActive: {
+    backgroundColor: '#4CAF50',
+    borderColor: '#fff',
+  },
+  userChipText: {
+    color: '#ddd',
+    fontSize: 13,
+  },
+  userChipTextActive: {
+    color: '#fff',
+    fontWeight: '700',
+  },
+
+  // ==================== HUMAN CHAT ====================
+  chatButtonTouch: {
+    padding: 4,
+  },
+  chatButtonText: {
+    fontSize: 20,
+  },
+  unreadBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -6,
+    backgroundColor: '#F44336',
+    borderRadius: 9,
+    minWidth: 18,
+    height: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+  },
+  unreadBadgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  chatBackText: {
+    color: '#fff',
+    fontSize: 20,
+    paddingRight: 4,
+  },
+  onlineDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: '#4CAF50',
+  },
+  userRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.08)',
+    gap: 10,
+  },
+  presenceDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  presenceOnline: {
+    backgroundColor: '#4CAF50',
+  },
+  presenceOffline: {
+    backgroundColor: 'rgba(255,255,255,0.25)',
+  },
+  userRowName: {
+    color: '#fff',
+    fontSize: 15,
+    flex: 1,
+  },
+  userRowStatus: {
+    color: '#888',
+    fontSize: 12,
+  },
+  chatEmptyText: {
+    color: '#888',
+    fontSize: 14,
+    textAlign: 'center',
+    marginTop: 20,
   },
 });
