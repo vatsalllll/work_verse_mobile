@@ -118,7 +118,15 @@ export default function App() {
 
   // --- Demo workspace login (backend requires JWT for /chat and /ws/chat) ---
   const [demoUsers, setDemoUsers] = useState<{ id: string; name: string; email: string }[]>([]);
-  const [currentUser, setCurrentUser] = useState<{ id: string; name: string; email: string } | null>(null);
+  const [currentUser, setCurrentUser] = useState<{ id: string; name: string; email: string; post?: string } | null>(null);
+
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authName, setAuthName] = useState('');
+  const [authPost, setAuthPost] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
 
   const demoLogin = useCallback(async (user: { id: string; name: string; email: string }) => {
     try {
@@ -129,26 +137,76 @@ export default function App() {
       });
       const { token, user: u } = await loginRes.json();
       authTokenRef.current = token;
-      setCurrentUser({ id: u?.id ?? user.id, name: u?.name ?? user.name, email: user.email });
+      setCurrentUser({ id: u?.id ?? user.id, name: u?.name ?? user.name, email: user.email, post: u?.post });
+      setScreen('game');
     } catch (err) {
       console.error('Demo login failed:', err);
     }
   }, []);
 
-  // Fetch demo users on start and auto-login as the first one
+  const handleAuthSubmit = useCallback(async () => {
+    setAuthError('');
+    if (!authEmail.trim() || !authPassword || (authMode === 'signup' && !authName.trim())) {
+      setAuthError('Please fill in all fields.');
+      return;
+    }
+    setAuthLoading(true);
+    try {
+      if (authMode === 'signup') {
+        const res = await fetch(`${API_BASE_URL}/auth/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: authName.trim(),
+            email: authEmail.trim(),
+            password: authPassword,
+            post: authPost.trim() || undefined,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Registration failed');
+        authTokenRef.current = data.token;
+        setCurrentUser({ id: data.user.id, name: data.user.name, email: data.user.email, post: data.user.post });
+      } else {
+        const res = await fetch(`${API_BASE_URL}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: authEmail.trim(),
+            password: authPassword,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Login failed');
+        authTokenRef.current = data.token;
+        setCurrentUser({ id: data.user.id, name: data.user.name, email: data.user.email, post: data.user.post });
+      }
+      setAuthEmail('');
+      setAuthPassword('');
+      setAuthName('');
+      setAuthPost('');
+      setScreen('game');
+    } catch (err: any) {
+      setAuthError(err.message || 'Authentication failed');
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [authMode, authEmail, authPassword, authName, authPost]);
+
+  // Fetch demo users on start
   useEffect(() => {
     (async () => {
       try {
         const res = await fetch(`${API_BASE_URL}/auth/demo-users`);
         const { users } = await res.json();
-        if (!users?.length) throw new Error('No demo users available');
-        setDemoUsers(users);
-        await demoLogin(users[0]);
+        if (users?.length) {
+          setDemoUsers(users);
+        }
       } catch (err) {
         console.error('Could not load demo users:', err);
       }
     })();
-  }, [demoLogin]);
+  }, []);
 
   // Presence heartbeat — lets other tabs/devices see this user as online
   useEffect(() => {
@@ -289,16 +347,20 @@ export default function App() {
       joystickPosition.current = { x: x / len, y: y / len };
     };
 
+    // Normalize single chars so WASD works with Shift/Caps Lock held
+    const normKey = (e: KeyboardEvent) => (e.key.length === 1 ? e.key.toLowerCase() : e.key);
+
     const onKeyDown = (e: KeyboardEvent) => {
       // Don't steal keys while typing in the chat inputs
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
 
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'a', 's', 'd'].includes(e.key)) {
+      const key = normKey(e);
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'a', 's', 'd'].includes(key)) {
         e.preventDefault();
-        pressedKeysRef.current.add(e.key);
+        pressedKeysRef.current.add(key);
         applyKeys();
-      } else if ((e.key === 'Enter' || e.key === ' ') && !dialogueOpen && nearbyPhilRef.current) {
+      } else if ((key === 'Enter' || key === ' ') && !dialogueOpen && nearbyPhilRef.current) {
         e.preventDefault();
         setActivePhilosopher(nearbyPhilRef.current);
         setDialogueOpen(true);
@@ -308,7 +370,7 @@ export default function App() {
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
-      if (pressedKeysRef.current.delete(e.key)) applyKeys();
+      if (pressedKeysRef.current.delete(normKey(e))) applyKeys();
     };
 
     const onBlur = () => {
@@ -519,21 +581,54 @@ export default function App() {
     };
   }, [screen, dialogueOpen]);
 
-  // WebSocket connection — uses streamingTextRef to avoid dependency on streamingText state
+  // Pending outbound payloads while the socket is still connecting; flushed
+  // on open, or diverted to the HTTP fallback if the connection fails.
+  const wsQueueRef = useRef<string[]>([]);
+
+  const sendViaHttp = useCallback((payloadStr: string) => {
+    const payload = JSON.parse(payloadStr);
+    fetch(`${API_BASE_URL}/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authTokenRef.current ? { Authorization: `Bearer ${authTokenRef.current}` } : {}),
+      },
+      body: payloadStr,
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        setMessages((prev) => [...prev, { type: 'philosopher', text: data.response ?? `Error: ${data.detail || 'no response'}` }]);
+        setIsStreaming(false);
+      })
+      .catch((err) => {
+        console.error('API error:', err, payload);
+        setMessages((prev) => [...prev, { type: 'philosopher', text: "I can't reach the office server right now. Please try again in a moment." }]);
+        setIsStreaming(false);
+      });
+  }, []);
+
+  // WebSocket connection — uses refs for mutable values to avoid stale closures
   const connectWebSocket = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    const existing = wsRef.current;
+    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
 
     const token = authTokenRef.current;
     const wsUrl = token
       ? `${WS_BASE_URL}/ws/chat?token=${encodeURIComponent(token)}`
       : `${WS_BASE_URL}/ws/chat`;
-    wsRef.current = new WebSocket(wsUrl);
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
 
-    wsRef.current.onopen = () => {
-      console.log('WebSocket connected');
+    ws.onopen = () => {
+      // Flush anything queued while connecting
+      const queued = wsQueueRef.current;
+      wsQueueRef.current = [];
+      queued.forEach((p) => ws.send(p));
     };
 
-    wsRef.current.onmessage = (event) => {
+    ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
 
       if (data.streaming === true && !data.response) {
@@ -553,14 +648,20 @@ export default function App() {
       }
     };
 
-    wsRef.current.onerror = (error) => {
+    // If the socket dies before opening, divert queued messages to HTTP
+    const divertQueue = () => {
+      const queued = wsQueueRef.current;
+      wsQueueRef.current = [];
+      queued.forEach(sendViaHttp);
+    };
+    ws.onerror = (error) => {
       console.error('WebSocket error:', error);
+      divertQueue();
     };
-
-    wsRef.current.onclose = () => {
-      console.log('WebSocket closed');
+    ws.onclose = () => {
+      divertQueue();
     };
-  }, []); // No dependencies — uses refs for mutable values
+  }, [sendViaHttp]);
 
   // Send message
   const sendMessage = useCallback(async () => {
@@ -576,44 +677,20 @@ export default function App() {
       return;
     }
 
-    // Use WebSocket for streaming
+    // Use WebSocket for streaming; queued sends flush on open or fall back to HTTP
     setIsStreaming(true);
     setStreamingText('');
 
-    connectWebSocket();
-
-    // Wait for connection
-    setTimeout(() => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          message: userMessage,
-          persona_id: activePhilosopher.personaId,
-        }));
-      } else {
-        // Fallback to HTTP
-        fetch(`${API_BASE_URL}/chat`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(authTokenRef.current ? { Authorization: `Bearer ${authTokenRef.current}` } : {}),
-          },
-          body: JSON.stringify({
-            message: userMessage,
-            persona_id: activePhilosopher.personaId,
-          }),
-        })
-          .then((res) => res.json())
-          .then((data) => {
-            setMessages((prev) => [...prev, { type: 'philosopher', text: data.response }]);
-            setIsStreaming(false);
-          })
-          .catch((err) => {
-            console.error('API error:', err);
-            setMessages((prev) => [...prev, { type: 'philosopher', text: "I'm tired right now, I can't talk. Please try again later." }]);
-            setIsStreaming(false);
-          });
-      }
-    }, 500);
+    const payload = JSON.stringify({
+      message: userMessage,
+      persona_id: activePhilosopher.personaId,
+    });
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(payload);
+    } else {
+      wsQueueRef.current.push(payload);
+      connectWebSocket();
+    }
   }, [inputText, activePhilosopher, connectWebSocket]);
 
   // Start dialogue
@@ -640,16 +717,43 @@ export default function App() {
     }
   }, []);
 
-  // Reset memory — clears conversation state on backend
+  // Reset memory — clears MY conversation history with the agents (per-user)
   const resetMemory = useCallback(async () => {
     try {
-      await fetch(`${API_BASE_URL}/reset-memory`, { method: 'POST' });
+      await fetch(`${API_BASE_URL}/reset-memory`, {
+        method: 'POST',
+        headers: authTokenRef.current ? { Authorization: `Bearer ${authTokenRef.current}` } : {},
+      });
       closeDialogue();
       console.log('Memory reset successfully');
     } catch (err) {
       console.error('Failed to reset memory:', err);
     }
   }, [closeDialogue]);
+
+  // Logout — tear down everything tied to the current user so the next
+  // login starts clean (socket, queued sends, dialogues, DMs, badges)
+  const logout = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    wsQueueRef.current = [];
+    setDialogueOpen(false);
+    setActivePhilosopher(null);
+    setMessages([]);
+    setInputText('');
+    setIsStreaming(false);
+    setStreamingText('');
+    setHumanChatOpen(false);
+    setActiveChatUser(null);
+    setHumanMessages([]);
+    setHumanInput('');
+    setUnreadByUser({});
+    authTokenRef.current = null;
+    setCurrentUser(null);
+    setScreen('menu');
+  }, []);
 
   // Joystick knob animated position (moves visually without re-renders)
   const joystickKnobX = useRef(new Animated.Value(0)).current;
@@ -744,55 +848,156 @@ export default function App() {
           resizeMode="cover"
         />
 
-        {/* Logo */}
-        <Image
-          source={require('./assets/images/logo.png')}
-          style={styles.logo}
-          resizeMode="contain"
-        />
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={{ flex: 1 }}
+        >
+          <ScrollView
+            contentContainerStyle={styles.menuScrollContainer}
+            keyboardShouldPersistTaps="handled"
+          >
+            {/* Logo */}
+            <Image
+              source={require('./assets/images/logo.png')}
+              style={styles.logo}
+              resizeMode="contain"
+            />
 
-        {/* Buttons */}
-        <View style={styles.menuButtonsContainer}>
-          {/* Demo user picker */}
-          {demoUsers.length > 0 && (
-            <View style={styles.userPickerContainer}>
-              <Text style={styles.userPickerLabel}>
-                Enter the office as{currentUser ? `: ${currentUser.name}` : '…'}
-              </Text>
-              <View style={styles.userPickerChips}>
-                {demoUsers.map((u) => (
-                  <TouchableOpacity
-                    key={u.email}
-                    style={[styles.userChip, currentUser?.email === u.email && styles.userChipActive]}
-                    onPress={() => demoLogin(u)}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={[styles.userChipText, currentUser?.email === u.email && styles.userChipTextActive]}>
-                      {u.name}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
+            {currentUser ? (
+              // Logged in UI
+              <View style={styles.menuCard}>
+                <Text style={styles.menuWelcomeTitle}>WorkVerse</Text>
+                <Text style={styles.menuWelcomeText}>
+                  Logged in as:{'\n'}
+                  <Text style={{ fontWeight: 'bold', color: '#00d4aa', fontSize: 18 }}>
+                    {currentUser.name} {currentUser.post ? `(${currentUser.post})` : ''}
+                  </Text>
+                </Text>
+
+                <TouchableOpacity
+                  style={styles.menuActionBtn}
+                  onPress={() => setScreen('game')}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.menuActionBtnText}>Enter Office</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.menuActionBtn, { backgroundColor: '#16213e' }]}
+                  onPress={() => setScreen('instructions')}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.menuActionBtnText}>Instructions</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.menuActionBtn, { backgroundColor: '#7a2e2e' }]}
+                  onPress={logout}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.menuActionBtnText}>Logout / Switch User</Text>
+                </TouchableOpacity>
               </View>
-            </View>
-          )}
+            ) : (
+              // Authentication UI (Login / Signup)
+              <View style={styles.menuCard}>
+                <Text style={styles.authTitle}>WorkVerse</Text>
+                <Text style={styles.authSubtitle}>
+                  {authMode === 'signup' ? 'Create your WorkVerse account' : 'Log in to enter the virtual office'}
+                </Text>
 
-          <TouchableOpacity
-            style={styles.menuButton}
-            onPress={() => setScreen('game')}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.menuButtonText}>Let's Play!</Text>
-          </TouchableOpacity>
+                {authError ? (
+                  <Text style={styles.authErrorText}>{authError}</Text>
+                ) : null}
 
-          <TouchableOpacity
-            style={styles.menuButton}
-            onPress={() => setScreen('instructions')}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.menuButtonText}>Instructions</Text>
-          </TouchableOpacity>
+                {authMode === 'signup' && (
+                  <>
+                    <TextInput
+                      style={styles.authInput}
+                      placeholder="Your name"
+                      placeholderTextColor="#888"
+                      value={authName}
+                      onChangeText={setAuthName}
+                      autoCapitalize="words"
+                    />
+                    <TextInput
+                      style={styles.authInput}
+                      placeholder="Position / Post (e.g. CTO) (optional)"
+                      placeholderTextColor="#888"
+                      value={authPost}
+                      onChangeText={setAuthPost}
+                      autoCapitalize="words"
+                    />
+                  </>
+                )}
 
-        </View>
+                <TextInput
+                  style={styles.authInput}
+                  placeholder="Email"
+                  placeholderTextColor="#888"
+                  value={authEmail}
+                  onChangeText={setAuthEmail}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+
+                <TextInput
+                  style={styles.authInput}
+                  placeholder="Password"
+                  placeholderTextColor="#888"
+                  value={authPassword}
+                  onChangeText={setAuthPassword}
+                  secureTextEntry
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+
+                <TouchableOpacity
+                  style={styles.authSubmitBtn}
+                  onPress={handleAuthSubmit}
+                  disabled={authLoading}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.authSubmitBtnText}>
+                    {authLoading ? 'Please wait...' : authMode === 'signup' ? 'Sign Up' : 'Log In'}
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={() => {
+                    setAuthMode(authMode === 'login' ? 'signup' : 'login');
+                    setAuthError('');
+                  }}
+                  style={{ marginTop: 14 }}
+                >
+                  <Text style={styles.authToggleText}>
+                    {authMode === 'login' ? "No account? Sign up" : "Already have an account? Log in"}
+                  </Text>
+                </TouchableOpacity>
+
+                {/* Demo user picker */}
+                {demoUsers.length > 0 && (
+                  <View style={styles.authDemoContainer}>
+                    <Text style={styles.authDemoLabel}>Quick demo login — pick a person</Text>
+                    <View style={styles.authDemoChips}>
+                      {demoUsers.map((u) => (
+                        <TouchableOpacity
+                          key={u.email}
+                          style={styles.authDemoChip}
+                          onPress={() => demoLogin(u)}
+                          activeOpacity={0.8}
+                        >
+                          <Text style={styles.authDemoChipText}>{u.name}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+                )}
+              </View>
+            )}
+          </ScrollView>
+        </KeyboardAvoidingView>
       </View>
     );
   }
@@ -938,7 +1143,7 @@ export default function App() {
           <Text style={styles.backButtonText}>← Menu</Text>
         </TouchableOpacity>
         <Text style={styles.gameTitle}>WorkVerse Office</Text>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
           <TouchableOpacity onPress={() => setHumanChatOpen(true)} style={styles.chatButtonTouch}>
             <Text style={styles.chatButtonText}>💬</Text>
             {totalUnread > 0 && (
@@ -949,6 +1154,9 @@ export default function App() {
           </TouchableOpacity>
           <TouchableOpacity onPress={resetMemory} style={styles.resetButtonTouch}>
             <Text style={styles.resetButtonText}>Reset 🔄</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={logout} style={styles.resetButtonTouch}>
+            <Text style={[styles.resetButtonText, { color: '#ff6b6b' }]}>Logout 🚪</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -1178,45 +1386,151 @@ const styles = StyleSheet.create({
   // ==================== MENU STYLES ====================
   menuContainer: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: '#0f0f23',
   },
   menuBackground: {
     position: 'absolute',
     width: SCREEN_WIDTH,
     height: SCREEN_HEIGHT,
-    opacity: 0.9,
+    opacity: 0.8,
+  },
+  menuScrollContainer: {
+    paddingVertical: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   logo: {
-    position: 'absolute',
-    top: SCREEN_HEIGHT * 0.15,
-    alignSelf: 'center',
     width: SCREEN_WIDTH * 0.8,
-    height: 200,
+    height: 120,
+    marginVertical: 20,
   },
-  menuButtonsContainer: {
-    position: 'absolute',
-    bottom: SCREEN_HEIGHT * 0.15,
-    width: '100%',
+  menuCard: {
+    width: SCREEN_WIDTH * 0.88,
+    maxWidth: 380,
+    backgroundColor: 'rgba(26, 26, 46, 0.95)',
+    borderRadius: 24,
+    padding: 24,
+    borderWidth: 2,
+    borderColor: '#5B4FCF',
     alignItems: 'center',
-    gap: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    elevation: 8,
   },
-  menuButton: {
-    backgroundColor: '#fff',
-    paddingHorizontal: 60,
-    paddingVertical: 16,
-    borderRadius: 20,
-    shadowColor: '#666',
-    shadowOffset: { width: 4, height: 4 },
-    shadowOpacity: 1,
-    shadowRadius: 0,
-    elevation: 4,
-    minWidth: 280,
-    alignItems: 'center',
-  },
-  menuButtonText: {
-    fontSize: 22,
+  menuWelcomeTitle: {
+    color: '#fff',
+    fontSize: 28,
     fontWeight: 'bold',
-    color: '#000',
+    marginBottom: 8,
+  },
+  menuWelcomeText: {
+    color: '#a0a0a0',
+    fontSize: 16,
+    textAlign: 'center',
+    marginBottom: 24,
+    lineHeight: 22,
+  },
+  menuActionBtn: {
+    backgroundColor: '#5B4FCF',
+    width: '100%',
+    paddingVertical: 14,
+    borderRadius: 16,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  menuActionBtnText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  authTitle: {
+    color: '#fff',
+    fontSize: 30,
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  authSubtitle: {
+    color: '#a0a0a0',
+    fontSize: 14,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  authErrorText: {
+    color: '#ff6b6b',
+    fontSize: 14,
+    textAlign: 'center',
+    marginBottom: 12,
+    fontWeight: 'bold',
+  },
+  authInput: {
+    width: '100%',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    color: '#fff',
+    fontSize: 15,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  authSubmitBtn: {
+    backgroundColor: '#5B4FCF',
+    width: '100%',
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginTop: 8,
+    shadowColor: '#5B4FCF',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  authSubmitBtnText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  authToggleText: {
+    color: '#5B4FCF',
+    fontSize: 14,
+    textDecorationLine: 'underline',
+  },
+  authDemoContainer: {
+    width: '100%',
+    marginTop: 20,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.1)',
+    alignItems: 'center',
+  },
+  authDemoLabel: {
+    color: '#a0a0a0',
+    fontSize: 12,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 10,
+  },
+  authDemoChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  authDemoChip: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  authDemoChipText: {
+    color: '#fff',
+    fontSize: 13,
   },
 
   // ==================== INSTRUCTIONS STYLES ====================

@@ -15,13 +15,13 @@ class ApiService {
 
     async sendMessage(philosopherId: string, message: string): Promise<string> {
         try {
-            const response = await fetch(`${this.baseUrl}/api/chat`, {
+            const response = await fetch(`${this.baseUrl}/chat`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    philosopher_id: philosopherId,
+                    persona_id: philosopherId,
                     message: message,
                 }),
             });

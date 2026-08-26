@@ -127,7 +127,7 @@ class WebSocketService {
             this.socket?.send(
                 JSON.stringify({
                     message: message,
-                    philosopher_id: philosopherId,
+                    persona_id: philosopherId,
                 })
             );
 
